@@ -117,12 +117,21 @@ foreach ($app in $toFetch) {
             if ($s.value -match "SecretUri=([^;)]+)") {
                 $secretUri = $Matches[1]
                 $kvValue = az keyvault secret show --id $secretUri --query "value" --output tsv 2>$null
+                if ($LASTEXITCODE -ne 0 -or [string]::IsNullOrWhiteSpace($kvValue)) {
+                    Write-Host "  WARNING: could not read KV secret for '$($s.name)' (SecretUri). Check your Key Vault access policies or RBAC role." -ForegroundColor DarkYellow
+                    $kvValue = "(KV_ACCESS_FAILED: $secretUri)"
+                }
             } elseif ($s.value -match "VaultName=([^;)]+).*SecretName=([^;)]+)") {
                 $vaultName = $Matches[1]
                 $secretName = $Matches[2]
                 $kvValue = az keyvault secret show --vault-name $vaultName --name $secretName --query "value" --output tsv 2>$null
+                if ($LASTEXITCODE -ne 0 -or [string]::IsNullOrWhiteSpace($kvValue)) {
+                    Write-Host "  WARNING: could not read KV secret '$secretName' from vault '$vaultName' for '$($s.name)'. Check your Key Vault access policies or RBAC role." -ForegroundColor DarkYellow
+                    $kvValue = "(KV_ACCESS_FAILED: $vaultName/$secretName)"
+                }
             } else {
-                $kvValue = "(could not parse KV reference)"
+                Write-Host "  WARNING: could not parse KV reference for '$($s.name)': $($s.value)" -ForegroundColor DarkYellow
+                $kvValue = "(KV_PARSE_FAILED: $($s.value))"
             }
             [PSCustomObject]@{ Name = $s.name; Value = $kvValue }
         } else {
