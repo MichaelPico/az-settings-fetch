@@ -1,1 +1,3 @@
 # az-settings-fetch
+A PowerShell utility that pulls Azure App Service and Function App settings down to your local machine — ready to run.
+Point it at a resource group, pick an app, and it fetches all configuration settings, resolves any Key Vault references to their real values, and writes a ready-to-use local.settings.json (Function Apps) or appsettings.json (Web Apps) so you can run the app locally without any manual copy-pasting.
