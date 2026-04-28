@@ -43,25 +43,28 @@ function Invoke-GrantKvAccess {
         return $false
     }
 
-    Write-Host "  Trying RBAC role assignment (Key Vault Secrets User)..." -ForegroundColor Cyan
+    # Assign both simultaneously — RBAC covers vaults in RBAC mode, access policy covers legacy vaults
+    Write-Host "  Assigning RBAC role (Key Vault Secrets User)..." -ForegroundColor Cyan
     az role assignment create --role "Key Vault Secrets User" --assignee $script:currentUserId --scope $vaultId --output none 2>$null
-    if ($LASTEXITCODE -eq 0) {
-        Write-Host "  Role assigned. Waiting for propagation..." -ForegroundColor Green
-        $script:fixedVaults[$vaultName] = $true
-        return $true
-    }
+    $rbacOk = $LASTEXITCODE -eq 0
+    if ($rbacOk) { Write-Host "  RBAC role assigned." -ForegroundColor Green }
+    else          { Write-Host "  RBAC role assignment failed (vault may not use RBAC model)." -ForegroundColor DarkYellow }
 
-    Write-Host "  RBAC failed, trying access policy..." -ForegroundColor Cyan
+    Write-Host "  Assigning access policy (get, list)..." -ForegroundColor Cyan
     az keyvault set-policy --name $vaultName --object-id $script:currentUserId --secret-permissions get list --output none 2>$null
-    if ($LASTEXITCODE -eq 0) {
-        Write-Host "  Access policy set. Waiting for propagation..." -ForegroundColor Green
-        $script:fixedVaults[$vaultName] = $true
-        return $true
+    $policyOk = $LASTEXITCODE -eq 0
+    if ($policyOk) { Write-Host "  Access policy assigned." -ForegroundColor Green }
+    else           { Write-Host "  Access policy assignment failed (vault may not use access policy model)." -ForegroundColor DarkYellow }
+
+    if (-not $rbacOk -and -not $policyOk) {
+        Write-Host "  Could not assign access automatically — you may need elevated permissions to modify this vault." -ForegroundColor Red
+        $script:fixedVaults[$vaultName] = $false
+        return $false
     }
 
-    Write-Host "  Could not assign access automatically — you may need elevated permissions to modify this vault." -ForegroundColor Red
-    $script:fixedVaults[$vaultName] = $false
-    return $false
+    Write-Host "  Waiting for propagation..." -ForegroundColor Cyan
+    $script:fixedVaults[$vaultName] = $true
+    return $true
 }
 
 function ConvertTo-NestedHashtable($flat) {
