@@ -25,6 +25,45 @@ $outDir = Join-Path $PSScriptRoot "output\${timestamp}_${rgName}"
 New-Item -ItemType Directory -Path $outDir | Out-Null
 Write-Host "Output directory: $outDir"
 
+function Invoke-GrantKvAccess {
+    param([string]$vaultName)
+
+    if ($script:fixedVaults.ContainsKey($vaultName)) { return $script:fixedVaults[$vaultName] }
+
+    $confirm = Read-Host "  Attempt to auto-assign Key Vault access for '$vaultName'? (y/N)"
+    if ($confirm -notmatch '^[Yy]') {
+        $script:fixedVaults[$vaultName] = $false
+        return $false
+    }
+
+    $vaultId = az keyvault show --name $vaultName --query id --output tsv 2>$null
+    if ($LASTEXITCODE -ne 0 -or [string]::IsNullOrWhiteSpace($vaultId)) {
+        Write-Host "  Could not retrieve vault '$vaultName' — you may not have Reader access to it." -ForegroundColor Red
+        $script:fixedVaults[$vaultName] = $false
+        return $false
+    }
+
+    Write-Host "  Trying RBAC role assignment (Key Vault Secrets User)..." -ForegroundColor Cyan
+    az role assignment create --role "Key Vault Secrets User" --assignee $script:currentUserId --scope $vaultId --output none 2>$null
+    if ($LASTEXITCODE -eq 0) {
+        Write-Host "  Role assigned. Waiting for propagation..." -ForegroundColor Green
+        $script:fixedVaults[$vaultName] = $true
+        return $true
+    }
+
+    Write-Host "  RBAC failed, trying access policy..." -ForegroundColor Cyan
+    az keyvault set-policy --name $vaultName --object-id $script:currentUserId --secret-permissions get list --output none 2>$null
+    if ($LASTEXITCODE -eq 0) {
+        Write-Host "  Access policy set. Waiting for propagation..." -ForegroundColor Green
+        $script:fixedVaults[$vaultName] = $true
+        return $true
+    }
+
+    Write-Host "  Could not assign access automatically — you may need elevated permissions to modify this vault." -ForegroundColor Red
+    $script:fixedVaults[$vaultName] = $false
+    return $false
+}
+
 function ConvertTo-NestedHashtable($flat) {
     $root = [ordered]@{}
     foreach ($key in $flat.Keys) {
@@ -102,6 +141,9 @@ if (-not $toFetch) {
     exit
 }
 
+$currentUserId = az ad signed-in-user show --query id --output tsv 2>$null
+$fixedVaults = @{}
+
 foreach ($app in $toFetch) {
     Write-Host "Fetching settings for $($app.Name)..." -ForegroundColor Cyan
 
@@ -118,16 +160,30 @@ foreach ($app in $toFetch) {
                 $secretUri = $Matches[1]
                 $kvValue = az keyvault secret show --id $secretUri --query "value" --output tsv 2>$null
                 if ($LASTEXITCODE -ne 0 -or [string]::IsNullOrWhiteSpace($kvValue)) {
-                    Write-Host "  WARNING: could not read KV secret for '$($s.name)' (SecretUri). Check your Key Vault access policies or RBAC role." -ForegroundColor DarkYellow
-                    $kvValue = "(KV_ACCESS_FAILED: $secretUri)"
+                    Write-Host "  WARNING: could not read KV secret for '$($s.name)' (SecretUri)." -ForegroundColor DarkYellow
+                    if ($secretUri -match "https://([^.]+)\.vault\.azure\.net") {
+                        if (Invoke-GrantKvAccess $Matches[1]) {
+                            Start-Sleep -Seconds 10
+                            $kvValue = az keyvault secret show --id $secretUri --query "value" --output tsv 2>$null
+                        }
+                    }
+                    if ($LASTEXITCODE -ne 0 -or [string]::IsNullOrWhiteSpace($kvValue)) {
+                        $kvValue = "(KV_ACCESS_FAILED: $secretUri)"
+                    }
                 }
             } elseif ($s.value -match "VaultName=([^;)]+).*SecretName=([^;)]+)") {
                 $vaultName = $Matches[1]
                 $secretName = $Matches[2]
                 $kvValue = az keyvault secret show --vault-name $vaultName --name $secretName --query "value" --output tsv 2>$null
                 if ($LASTEXITCODE -ne 0 -or [string]::IsNullOrWhiteSpace($kvValue)) {
-                    Write-Host "  WARNING: could not read KV secret '$secretName' from vault '$vaultName' for '$($s.name)'. Check your Key Vault access policies or RBAC role." -ForegroundColor DarkYellow
-                    $kvValue = "(KV_ACCESS_FAILED: $vaultName/$secretName)"
+                    Write-Host "  WARNING: could not read KV secret '$secretName' from vault '$vaultName' for '$($s.name)'." -ForegroundColor DarkYellow
+                    if (Invoke-GrantKvAccess $vaultName) {
+                        Start-Sleep -Seconds 10
+                        $kvValue = az keyvault secret show --vault-name $vaultName --name $secretName --query "value" --output tsv 2>$null
+                    }
+                    if ($LASTEXITCODE -ne 0 -or [string]::IsNullOrWhiteSpace($kvValue)) {
+                        $kvValue = "(KV_ACCESS_FAILED: $vaultName/$secretName)"
+                    }
                 }
             } else {
                 Write-Host "  WARNING: could not parse KV reference for '$($s.name)': $($s.value)" -ForegroundColor DarkYellow
